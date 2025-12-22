@@ -188,10 +188,13 @@ async function startMic() {
   const track = micStream.getAudioTracks()[0];
   micProducer = await sendTransport.produce({
     track,
-    appData: { label: "mic" }
+    appData: { label: "mic", cameraId: cameraSelect.value }
   });
 
-  ws.send(JSON.stringify({ type: "startTalk", data: { cameraId: cameraSelect.value } }));
+  ws.send(JSON.stringify({
+    type: "startTalk",
+    data: { cameraId: cameraSelect.value, producerId: micProducer.id }
+  }));
 
   setRingStatus("Talking… (mic sending)");
 }

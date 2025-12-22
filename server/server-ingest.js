@@ -64,6 +64,56 @@ let ingest = {
   __audioSub: null,
 };
 
+// --- talkback state ---
+let talk = {
+  cameraId: null,
+  producerId: null,
+  plainTransport: null,
+  consumer: null,
+  ffmpeg: null,
+  rtpPort: null,
+  udpSock: null,
+  udpPort: null,
+};
+
+// cleanup helper
+async function stopTalkBridge() {
+  if (talk.consumer) {
+    try {
+      talk.consumer.close();
+    } catch { }
+    talk.consumer = null;
+  }
+  if (talk.plainTransport) {
+    try {
+      talk.plainTransport.close();
+    } catch { }
+    talk.plainTransport = null;
+  }
+  if (talk.udpSock) {
+    try {
+      talk.udpSock.close();
+    } catch { }
+    talk.udpSock = null;
+  }
+
+  if (talk.ffmpeg) {
+    const p = talk.ffmpeg;
+    talk.ffmpeg = null;
+    await killProcess(p, 1000);
+  }
+  if (talk._sdpPath) {
+    try {
+      fs.unlinkSync(talk._sdpPath);
+    } catch { }
+    talk._sdpPath = null;
+  }
+  talk.cameraId = null;
+  talk.producerId = null;
+  talk.rtpPort = null;
+  talk.udpPort = null;
+}
+
 const mediaCodecs = [
   { kind: "audio", mimeType: "audio/opus", clockRate: 48000, channels: 2 },
   {
@@ -83,7 +133,7 @@ function send(ws, msg) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
     }
-  } catch {}
+  } catch { }
 }
 
 function broadcast(msg) {
@@ -152,6 +202,21 @@ async function initMediasoup() {
 
   router = await worker.createRouter({ mediaCodecs });
   console.log("mediasoup router ready");
+}
+
+function writeOpusInputSdp({ ip, port, payloadType, channels = 2, clockRate = 48000 }) {
+  // FFmpeg will listen for RTP on `port`
+  return [
+    "v=0",
+    `o=- 0 0 IN IP4 ${ip}`,
+    "s=MicRtp",
+    `c=IN IP4 ${ip}`,
+    "t=0 0",
+    `m=audio ${port} RTP/AVP ${payloadType}`,
+    `a=rtpmap:${payloadType} opus/${clockRate}/${channels}`,
+    "a=recvonly",
+    "",
+  ].join("\n");
 }
 
 async function createWebRtcTransport() {
@@ -294,6 +359,9 @@ async function startIngest() {
 }
 
 async function stopIngest() {
+  //stop mic->ring bridge first
+  await stopTalkBridge();
+
   // 0) Stop receiving RTP events first (most important)
   if (ingest.__videoSub) {
     try { ingest.__videoSub.unsubscribe(); } catch { }
@@ -393,6 +461,149 @@ async function stopIngest() {
   await delay(400);
 
   broadcast({ type: "ingestStopped" });
+}
+
+async function startTalkBridge({ cameraId, producerId }) {
+  await stopTalkBridge();
+
+  // Talkback in this implementation requires a Ring LiveCall
+  // because we use liveCall.sendAudioPacket().
+  const liveCall = ingest.liveCall;
+
+  if (!liveCall) {
+    throw new Error("Talkback requires ingest.liveCall (startLiveCall path). Start Live first.");
+  }
+  if (typeof liveCall.sendAudioPacket !== "function") {
+    throw new Error("Ring LiveCall does not expose sendAudioPacket(). Talkback not supported on this device/API path.");
+  }
+
+  // Optional but usually required to actually hear talkback
+  try {
+    if (typeof liveCall.activateCameraSpeaker === "function") {
+      await liveCall.activateCameraSpeaker();
+      console.log("[talk] activateCameraSpeaker() called");
+    } else {
+      console.log("[talk] liveCall has no activateCameraSpeaker()");
+    }
+  } catch (e) {
+    console.log("[talk] activateCameraSpeaker failed (may still work):", e?.message || e);
+  }
+
+  talk.cameraId = cameraId;
+  talk.producerId = producerId;
+
+  // 1) Create a PlainTransport that will SEND RTP out from mediasoup to localhost:rtpPort (FFmpeg reads this)
+  const pt = await router.createPlainTransport({
+    listenIp: { ip: LISTEN_IP },
+    rtcpMux: true,
+    comedia: false, // we explicitly connect to FFmpeg's listening port
+  });
+  talk.plainTransport = pt;
+
+  // local port FFmpeg will bind to as its INPUT (mic RTP)
+  const rtpPort = 55000 + Math.floor(Math.random() * 5000);
+  talk.rtpPort = rtpPort;
+
+  await pt.connect({ ip: "127.0.0.1", port: rtpPort });
+
+  // 2) Consume the mic producer onto this PlainTransport (RTP flows out of pt)
+  if (!router.canConsume({ producerId, rtpCapabilities: router.rtpCapabilities })) {
+    throw new Error("Cannot consume mic producer (caps mismatch)");
+  }
+
+  const consumer = await pt.consume({
+    producerId,
+    rtpCapabilities: router.rtpCapabilities,
+    paused: false,
+  });
+  talk.consumer = consumer;
+
+  if (consumer.kind !== "audio") {
+    throw new Error("startTalk expects an audio producerId");
+  }
+
+  const inCodec = consumer.rtpParameters.codecs?.[0];
+  if (!inCodec) throw new Error("Mic consumer has no codec info");
+
+  const inPt = inCodec.payloadType;
+  const inCh = inCodec.channels ?? 2;
+  const inRate = inCodec.clockRate ?? 48000;
+
+  // 3) SDP so FFmpeg can receive the mic RTP from mediasoup
+  const sdpIn = writeOpusInputSdp({
+    ip: "127.0.0.1",
+    port: rtpPort,
+    payloadType: inPt,
+    channels: inCh,
+    clockRate: inRate,
+  });
+
+  const sdpPath = path.join(os.tmpdir(), `mic-in-${cameraId}.sdp`);
+  fs.writeFileSync(sdpPath, sdpIn);
+  talk._sdpPath = sdpPath;
+
+  // 4) NEW: Create UDP receiver that forwards RTP packets into Ring via liveCall.sendAudioPacket()
+  const udpPort = 56000 + Math.floor(Math.random() * 5000);
+  talk.udpPort = udpPort;
+
+  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  sock.on("listening", () => {
+    const a = sock.address();
+    console.log("[talk] udp listening", a);
+  });
+  talk.udpSock = sock;
+
+  sock.on("error", (err) => {
+    console.log("[talk] udpSock error:", err?.message || err);
+  });
+
+  sock.on("message", (pkt) => {
+    try {
+      // pkt is a full RTP packet produced by FFmpeg
+      liveCall.sendAudioPacket(pkt);
+    } catch (e) {
+      console.log("[talk] sendAudioPacket error:", e?.message || e);
+    }
+  });
+
+  await new Promise((resolve) => sock.bind(udpPort, "127.0.0.1", resolve));
+  console.log("[talk] UDP forwarder ready on", { udpPort });
+
+  // 5) FFmpeg: input = mic RTP on localhost, output = RTP to localhost udpPort (not to Ring IP!)
+  // Ring expects talkback typically Opus mono 48k; keep it consistent.
+  // NOTE: Payload type here is "local" (for our UDP packets) - Ring's sendAudioPacket generally accepts RTP bytes.
+  const OUT_PT = Number(process.env.RING_TALK_PT || 111);
+  const OUT_SSRC = Number(process.env.RING_TALK_SSRC || 55555555);
+
+  const args = [
+    "-loglevel", "info",
+    "-protocol_whitelist", "file,udp,rtp",
+    "-fflags", "nobuffer",
+    "-flags", "low_delay",
+    "-analyzeduration", "2000000",
+    "-probesize", "2000000",
+    "-i", sdpPath,
+
+    "-vn",
+    "-ac", "1",
+    "-ar", "48000",
+    "-c:a", "libopus",
+    "-b:a", "32k",
+
+    "-f", "rtp",
+    "-payload_type", String(OUT_PT),
+    "-ssrc", String(OUT_SSRC),
+    `rtp://127.0.0.1:${udpPort}?pkt_size=1200`,
+  ];
+
+  console.log("[talk] ffmpeg:", args.join(" "));
+  const ff = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+  talk.ffmpeg = ff;
+
+  ff.stderr.on("data", (d) => console.log("[talk ffmpeg]", d.toString().trim()));
+  ff.on("exit", (code, sig) => console.log("[talk ffmpeg] exited", { code, sig }));
+
+  console.log("[talk] bridging mic -> ring (via liveCall.sendAudioPacket)");
 }
 
 function toBuffer(x) {
@@ -737,6 +948,21 @@ app.post("/api/ring/cameras/:id/live/start", async (req, res) => {
         console.log("[ring] videoSplitter:", ingest.liveCall.videoSplitter?.constructor?.name);
         console.log("[ring] videoSplitter has pipe:", typeof ingest.liveCall.videoSplitter?.pipe);
 
+        function dumpMethods(obj, label) {
+          if (!obj) return;
+          const proto = Object.getPrototypeOf(obj);
+          const methods = Object.getOwnPropertyNames(proto).filter(k => typeof obj[k] === "function");
+          console.log(`[ring-debug] ${label} keys:`, Object.keys(obj));
+          console.log(`[ring-debug] ${label} methods:`, methods.filter(m => /audio|talk|speaker|mic|rtp|return|send/i.test(m)));
+        }
+
+        dumpMethods(ingest.liveCall, "liveCall");
+        dumpMethods(ingest.liveCall?.sipSession, "liveCall.sipSession");
+        dumpMethods(ingest.sipSession, "sipSession");
+
+        console.log("[ring-debug] liveCall.sipSession?", !!ingest.liveCall?.sipSession);
+        console.log("[ring-debug] sipSession keys:", Object.keys(ingest.liveCall?.sipSession || {}));
+
         ingest.rtpInPort = 50000 + Math.floor(Math.random() * 10000);
         ingest.rtpSock = dgram.createSocket("udp4");
 
@@ -1012,13 +1238,17 @@ wss.on("connection", (ws) => {
         }
 
         case "startTalk": {
-          // Phase 2: wire mic producer -> Ring talkback
-          // For now: acknowledge so UI doesn’t look broken
-          send(ws, { type: "talkStatus", data: { ok: true, state: "starting" } });
+          const { cameraId, producerId } = msg.data || {};
+          if (!cameraId || !producerId) {
+            throw new Error("startTalk requires cameraId and producerId");
+          }
+          await startTalkBridge({ cameraId, producerId });
+          send(ws, { type: "talkStatus", data: { ok: true, state: "bridging", cameraId } });
           break;
         }
 
         case "stopTalk": {
+          await stopTalkBridge();
           send(ws, { type: "talkStatus", data: { ok: true, state: "stopped" } });
           break;
         }
