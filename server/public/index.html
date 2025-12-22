@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>mediasoup POC</title>
+    <style>
+      body { font-family: sans-serif; }
+      video { width: 480px; border: 1px solid #ccc; margin: 8px 0; }
+      button { padding: 8px 12px; margin-right: 8px; }
+      pre { background: #f6f6f6; padding: 8px; height: 180px; overflow: auto; }
+      .row { display: flex; gap: 16px; }
+    </style>
+  </head>
+  <body>
+    <h2>mediasoup browser-first POC</h2>
+
+    <div>
+      <button id="btnStart">Start (produce webcam)</button>
+      <button id="btnConsume">Consume remote</button>
+    </div>
+
+    <div class="row">
+      <div>
+        <h3>Local</h3>
+        <video id="localVideo" autoplay playsinline muted></video>
+      </div>
+      <div>
+        <h3>Remote</h3>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <pre id="log"></pre>
+
+    <script src="/client-bundle.js"></script>
+  </body>
+</html>

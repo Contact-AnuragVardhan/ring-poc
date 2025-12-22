@@ -1,0 +1,16 @@
+services:
+  mediasoup:
+    build: ./server
+    env_file:
+      - ./server/.env
+    environment:
+      LISTEN_IP: "0.0.0.0"
+      RTC_MIN_PORT: "40000"
+      RTC_MAX_PORT: "40100"
+    ports:
+      - "3000:3000/tcp"
+      - "40000-40100:40000-40100/udp"
+    restart: unless-stopped
+    volumes:
+      - ./media:/app/media:ro
+    command: npm run start:ingest
