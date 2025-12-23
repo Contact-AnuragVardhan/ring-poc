@@ -457,6 +457,10 @@ async function stopIngest() {
     ingest.audioSdpPath = null;
   }
 
+  ingest.ringAudioPt = null;
+  ingest.ringAudioSsrc = null;
+  ingest.audioRtpInPort = null;
+
   // 7) tiny delay so Ring + OS sockets settle before next start
   await delay(400);
 
@@ -772,9 +776,20 @@ async function subscribeRingAudioRtp(cameraId) {
   ingest.audioRtpInPort = 51000 + Math.floor(Math.random() * 10000);
   ingest.audioRtpSock = dgram.createSocket("udp4");
 
+  ingest.audioRtpSock.on("error", (e) => {
+    console.log("[ring-audio] udp error:", e?.message || e);
+  });
+
   const dstAudioPort = ingest.audioTransport.tuple.localPort;
 
   const audioSub = ingest.liveCall.onAudioRtp.subscribe((evt) => {
+    if ((ingest._audioDbg = (ingest._audioDbg || 0) + 1) % 200 === 0) {
+      console.log("[ring-audio] pkt", {
+        ringAudioPt: ingest.ringAudioPt,
+        evtPt: evt?.header?.payloadType,
+        hasFfmpeg: !!ingest.audioFfmpeg
+      });
+    }
     const pkt = getRawRtpBytes(evt);
     if (!pkt) return;
 
@@ -860,6 +875,10 @@ app.post("/api/ring/cameras/:id/live/start", async (req, res) => {
       ingest.ringSsrc = null;
       ingest.sdpPath = null;
       ingest.bytesTimer = null;
+
+      ingest.ringAudioPt = null;
+      ingest.ringAudioSsrc = null;
+      ingest.audioRtpInPort = null;
 
       // 1) create mediasoup plain transport
       const plainTransport = await router.createPlainTransport({
