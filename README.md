@@ -217,9 +217,3 @@ Subscriptions and Ring plan affect this.
 - HTML page: `server/public/ingest.html`
 - Bundle: served as `/ingest-client-bundle.js` (built by `npm run build:client`)
 - Server entry: `server/server-ingest.js`
-
----
-
-## Disclaimer
-
-##This project is a POC for personal/educational use. Ring device capabilities, APIs, and behavior vary by model/account and may change over time.
