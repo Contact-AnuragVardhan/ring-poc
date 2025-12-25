@@ -49,7 +49,6 @@
 
     <div id="ringStatus" style="margin-top:8px; font-family: monospace;"></div>
   </section>
-
   <div>
     <button id="btnStopIngest">Stop ingest</button>
   </div>
@@ -59,6 +58,30 @@
 
   <h3>Logs</h3>
   <pre id="log"></pre>
+
+  <section style="border:1px solid #ddd; padding:12px; margin:12px 0;">
+    <h3>Ring History</h3>
+
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button id="btnLoadHistory" disabled>Load History</button>
+      <label>
+        Limit:
+        <input id="historyLimit" type="number" value="25" min="1" max="200" style="width:80px;" />
+      </label>
+    </div>
+
+    <div style="margin-top:8px; display:flex; gap:16px; flex-wrap:wrap;">
+      <div style="min-width:320px; max-width:520px;">
+        <div style="font-family: monospace; margin-bottom:6px;">Events:</div>
+        <ul id="historyList" style="margin-top:8px; max-height:220px; overflow:auto; padding-left:18px;"></ul>
+      </div>
+
+      <div>
+        <div style="font-family: monospace; margin-bottom:6px;">Playback:</div>
+        <video id="historyVideo" controls playsinline style="width:720px; height:405px; background:#000;"></video>
+      </div>
+    </div>
+  </section>
 
   <script src="/ingest-client-bundle.js"></script>
 </body>

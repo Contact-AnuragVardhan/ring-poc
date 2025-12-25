@@ -1,5 +1,7 @@
 // server/ring-control.js
 const { RingApi } = require("ring-client-api");
+const { Readable } = require("stream");
+const util = require("util");
 
 // Keep a singleton in-memory instance
 let ringApi = null;
@@ -122,9 +124,186 @@ async function getCameraCapabilities(cameraId) {
     };
 }
 
+async function getCameraHistory(cameraId, limit = 25) {
+    const cam = await getCameraById(cameraId);
+    if (typeof cam.getHistory !== "function") {
+        debugDumpCamera(cam, `camera ${cam.id} (${cam.name})`);
+        throw new Error("This camera object does not support getHistory()");
+    }
+    const items = await cam.getHistory(Number(limit) || 25);
+
+    // Normalize a few useful fields (Ring varies by device/account)
+    return (items || []).map((h) => ({
+        id: h.id ?? h.ding_id ?? h.dingId,
+        kind: h.kind ?? h.alert ?? h.type,
+        createdAt: h.created_at ?? h.createdAt ?? h.start_time,
+        // any extra fields you might want:
+        // hasRecording: h.recording_status ?? undefined,
+    })).filter(x => x.id != null);
+}
+
+/**
+ * RECORDING
+ * Return either:
+ *  - { type: 'url', url: 'https://...' }
+ *  - { type: 'stream', stream: Readable }
+ */
+async function getCameraRecording(cameraId, eventId) {
+    const cam = await getCameraById(cameraId);
+    console.log(`inputs cameraId=`, cameraId, "eventId=", eventId, "eventIdType=", typeOf(eventId));
+    const idStr = String(eventId);
+
+    if (typeof cam.getRecordingUrl === "function") {
+        console.log("==================In getRecordingUrl with idStr ", idStr);
+        const url = await cam.getRecordingUrl(idStr).catch(async (error) => {
+            console.error(`First attempt failed with: ${JSON.stringify(safeErr(error))}`);
+            // some versions want a number, try that too
+            const n = Number(idStr);
+            if (!Number.isNaN(n)) {
+                try {
+                    return await cam.getRecordingUrl(n);
+                } catch (secondError) {
+                    throw new Error(`getRecordingUrl failed. String error: ${error.message}. Number error: ${secondError.message}`);
+                }
+            }
+            throw error;
+        });
+
+
+        console.log("========================url from getCameraRecording is ", JSON.stringify(url));
+
+        if (typeof url === "string" && url.length) {
+            return { type: "url", url };
+        }
+    }
+
+    //If older API: getRecording(eventId)
+    if (typeof cam.getRecording === "function") {
+        const rec = await cam.getRecording(idStr);
+
+        if (typeof rec === "string") {
+            return { type: "url", url: rec };
+        }
+
+        if (rec && typeof rec === "object") {
+            const url =
+                rec.url ||
+                rec.recordingUrl ||
+                rec.recording_url ||
+                rec.downloadUrl ||
+                rec.download_url;
+
+            if (typeof url === "string") return { type: "url", url };
+
+            const stream =
+                rec.stream ||
+                rec.body ||
+                (typeof rec.pipe === "function" ? rec : null);
+
+            if (stream && typeof stream.pipe === "function") {
+                return { type: "stream", stream };
+            }
+        }
+    }
+
+    debugDumpCamera(cam, `camera ${cam.id} (${cam.name})`);
+    throw new Error(
+        "No supported recording method found. Expected cam.getRecordingUrl() or cam.getRecording(). " +
+        "See ring-debug dump above for available methods."
+    );
+}
+
+function debugDumpCamera(cam, label = "camera") {
+    try {
+        console.log(`\n[ring-debug] ===== ${label} =====`);
+        console.log("[ring-debug] ctor:", cam?.constructor?.name);
+        console.log("[ring-debug] typeof:", typeof cam);
+
+        // Own keys (enumerable)
+        console.log("[ring-debug] Object.keys:", Object.keys(cam || {}));
+
+        // Own property names (includes non-enumerable)
+        console.log("[ring-debug] Object.getOwnPropertyNames:", Object.getOwnPropertyNames(cam || {}));
+
+        // Symbols
+        console.log("[ring-debug] Object.getOwnPropertySymbols:", Object.getOwnPropertySymbols(cam || {}).map(String));
+
+        // Prototype chain methods
+        let p = Object.getPrototypeOf(cam);
+        let depth = 0;
+        while (p && depth < 6) {
+            const names = Object.getOwnPropertyNames(p);
+            const methods = names.filter((k) => typeof cam[k] === "function" && k !== "constructor");
+            console.log(`[ring-debug] proto depth ${depth} (${p?.constructor?.name}): methods=`, methods);
+            p = Object.getPrototypeOf(p);
+            depth++;
+        }
+
+        // Safe snapshot (primitives only)
+        const snapshot = {};
+        for (const k of Object.getOwnPropertyNames(cam || {})) {
+            try {
+                const v = cam[k];
+                if (v == null || ["string", "number", "boolean"].includes(typeof v)) snapshot[k] = v;
+            } catch { }
+        }
+        console.log("[ring-debug] primitive snapshot:", snapshot);
+
+        // Deep-ish inspect (handles circular)
+        console.log(
+            "[ring-debug] util.inspect:",
+            util.inspect(cam, { depth: 2, colors: false, showHidden: true, getters: true })
+        );
+
+        console.log(`[ring-debug] ===== end ${label} =====\n`);
+    } catch (e) {
+        console.log("[ring-debug] dump failed:", e?.message || e);
+    }
+}
+
+function safeErr(err) {
+    if (!err) return err;
+    return {
+        name: err.name,
+        message: err.message,
+        stack: err.stack,
+        code: err.code,
+        status: err.status,
+        statusCode: err.statusCode,
+        response: err.response ? {
+            status: err.response.status,
+            statusText: err.response.statusText,
+            dataType: typeof err.response.data,
+            dataKeys: err.response.data && typeof err.response.data === "object"
+                ? Object.keys(err.response.data).slice(0, 30)
+                : undefined,
+        } : undefined,
+    };
+}
+
+function redactUrl(u) {
+    try {
+        if (typeof u !== "string") return u;
+        const url = new URL(u);
+        // keep host + path, drop secrets
+        url.search = "";
+        return url.toString();
+    } catch {
+        return u;
+    }
+}
+
+function typeOf(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "array";
+    return typeof v;
+}
+
 
 module.exports = {
     listCameras,
     startRingToRtp,
-    getCameraCapabilities
+    getCameraCapabilities,
+    getCameraHistory,
+    getCameraRecording,
 };

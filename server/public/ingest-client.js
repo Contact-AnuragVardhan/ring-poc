@@ -7,8 +7,14 @@ const remoteVideo = document.getElementById("remoteVideo");
 const btnLoadCameras = document.getElementById("btnLoadCameras");
 const cameraSelect = document.getElementById("cameraSelect");
 const btnStartLive = document.getElementById("btnStartLive");
+const btnStopIngest = document.getElementById("btnStopIngest");
 const ringStatus = document.getElementById("ringStatus");
 const btnTalk = document.getElementById("btnTalk");
+
+const btnLoadHistory = document.getElementById("btnLoadHistory");
+const historyLimitEl = document.getElementById("historyLimit");
+const historyListEl = document.getElementById("historyList");
+const historyVideo = document.getElementById("historyVideo");
 
 function setRingStatus(msg) {
   ringStatus.textContent = msg;
@@ -90,6 +96,11 @@ async function startRingLive(cameraId) {
   setRingStatus(`Live started: ${json.name || cameraId}`);
 }
 
+async function stopRingLive() {
+  const res = await fetch("/api/ingest/stop", { method: "POST" });
+  const json = await res.json();
+  return json;
+}
 
 async function ensureDevice() {
   if (device) return;
@@ -245,8 +256,12 @@ async function unlockPlayback() {
 }
 
 
-async function tryStartPlayback() {
+/*async function tryStartPlayback() {
   try { await remoteVideo.play(); } catch { }
+}*/
+
+function tryStartPlayback() {
+  remoteVideo.play().catch(() => {});
 }
 
 let isHolding = false;
@@ -255,6 +270,160 @@ function setTalkUI(isTalking) {
   btnTalk.textContent = isTalking ? "🎙️ Talking…" : "Hold to Talk";
   btnTalk.style.opacity = isTalking ? "0.8" : "1";
 }
+
+function clearHistoryUI() {
+  historyListEl.innerHTML = "";
+  historyVideo.removeAttribute("src");
+  historyVideo.load();
+}
+
+function fmtTime(ts) {
+  try {
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) return d.toLocaleString();
+  } catch {}
+  return String(ts || "");
+}
+
+function renderHistory(cameraId, data) {
+  historyListEl.innerHTML = "";
+
+  const recorded = data?.recorded || [];
+  const activity = data?.activity || [];
+  const counts = data?.counts || { recorded: recorded.length, activity: activity.length, total: recorded.length + activity.length };
+
+  const header = document.createElement("div");
+  header.style.display = "flex";
+  header.style.justifyContent = "space-between";
+  header.style.alignItems = "baseline";
+  header.style.margin = "8px 0";
+
+  const title = document.createElement("div");
+  title.textContent = `History (${counts.total})`;
+  title.style.fontWeight = "700";
+
+  const sub = document.createElement("div");
+  sub.textContent = `🎥 Recorded: ${counts.recorded}  |  🕒 Activity: ${counts.activity}`;
+  sub.style.opacity = "0.75";
+  sub.style.fontSize = "12px";
+
+  header.appendChild(title);
+  header.appendChild(sub);
+  historyListEl.appendChild(header);
+
+  // ---- Recorded clips ----
+  const recTitle = document.createElement("div");
+  recTitle.textContent = `🎥 Recorded Clips (${recorded.length})`;
+  recTitle.style.marginTop = "10px";
+  recTitle.style.fontWeight = "700";
+  historyListEl.appendChild(recTitle);
+
+  if (!recorded.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "No recorded clips found.";
+    empty.style.opacity = "0.75";
+    empty.style.margin = "6px 0";
+    historyListEl.appendChild(empty);
+  }
+
+  for (const h of recorded) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "8px";
+    row.style.alignItems = "center";
+    row.style.padding = "6px 0";
+    row.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
+
+    const when = fmtTime(h.created_at);
+    const label = `${when} — ${h.kind || "event"}`;
+
+    const a = document.createElement("a");
+    a.href = "#";
+    a.textContent = label;
+    a.style.textDecoration = "none";
+
+    a.onclick = (e) => {
+      e.preventDefault();
+      const ding = h.dingIdStr || h.dingId || h.id;
+      const url = `/api/ring/cameras/${encodeURIComponent(cameraId)}/recordings/${encodeURIComponent(ding)}`;
+      historyVideo.src = url;
+      historyVideo.play().catch(() => {});
+      setRingStatus(`Playing 🎥 ${h.kind} (${ding})`);
+    };
+
+    // small badge
+    const badge = document.createElement("span");
+    badge.textContent = "READY";
+    badge.style.fontSize = "11px";
+    badge.style.padding = "2px 6px";
+    badge.style.borderRadius = "999px";
+    badge.style.border = "1px solid rgba(255,255,255,0.2)";
+    badge.style.opacity = "0.9";
+
+    row.appendChild(a);
+    row.appendChild(badge);
+    historyListEl.appendChild(row);
+  }
+
+  // ---- Activity ----
+  const actTitle = document.createElement("div");
+  actTitle.textContent = `🕒 Activity (No Recording) (${activity.length})`;
+  actTitle.style.marginTop = "14px";
+  actTitle.style.fontWeight = "700";
+  historyListEl.appendChild(actTitle);
+
+  if (!activity.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "No activity events.";
+    empty.style.opacity = "0.75";
+    empty.style.margin = "6px 0";
+    historyListEl.appendChild(empty);
+  }
+
+  for (const h of activity) {
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexDirection = "column";
+    row.style.padding = "6px 0";
+    row.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
+    row.style.opacity = "0.75";
+
+    const when = fmtTime(h.created_at);
+    const top = document.createElement("div");
+    top.textContent = `${when} — ${h.kind || "event"}`;
+
+    const meta = document.createElement("div");
+    meta.style.fontSize = "12px";
+    meta.style.opacity = "0.9";
+
+    const recFlag = h.recorded === true ? "recorded=true" : "recorded=false";
+    const recStatus = h.recording_status ? `status=${h.recording_status}` : "status=null";
+    meta.textContent = `No clip available (${recFlag}, ${recStatus})`;
+
+    row.title = "This event does not have a playable recording. Only recorded=true and recording_status=ready are playable.";
+    row.appendChild(top);
+    row.appendChild(meta);
+    historyListEl.appendChild(row);
+  }
+}
+
+
+async function loadHistory(cameraId, limit) {
+  const res = await fetch(`/api/ring/cameras/${encodeURIComponent(cameraId)}/history?limit=${encodeURIComponent(limit)}`);
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || "history failed");
+  console.log("history events:", json);
+  return json;
+}
+
+/*async function playHistoryEvent(cameraId, eventId) {
+  const res = await fetch(`/api/ring/cameras/${encodeURIComponent(cameraId)}/history/${encodeURIComponent(eventId)}/recording`);
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || "recording failed");
+
+  historyVideo.src = json.url;
+  await historyVideo.play().catch(() => {});
+}*/
 
 const produceCbs = new Map(); // reqId -> cb
 
@@ -325,7 +494,7 @@ ws.onmessage = async (ev) => {
               reqId
             }
           }));
-           window.__produceCb = cb;
+          window.__produceCb = cb;
         } catch (e) { errCb(e); }
       });
     }
@@ -377,7 +546,8 @@ ws.onmessage = async (ev) => {
     // Resume first (start packets), then attempt play
     ws.send(JSON.stringify({ type: "resume", data: { consumerId } }));
 
-    await tryStartPlayback();
+    //await tryStartPlayback();
+    tryStartPlayback();
     // unmute after first track arrives
     remoteVideo.muted = false;
 
@@ -414,6 +584,9 @@ cameraSelect.onchange = async () => {
   setStartLiveEnabled(!!cameraSelect.value);
   setTalkEnabled(false, "Select camera then Start Live");
 
+  btnLoadHistory.disabled = !cameraSelect.value;
+  clearHistoryUI();
+
   const id = cameraSelect.value;
   if (!id) return;
 
@@ -422,10 +595,7 @@ cameraSelect.onchange = async () => {
     const json = await res.json();
     if (!json.ok) throw new Error(json.error || "caps failed");
 
-    // For now, we keep listen-only unless you implement talk-back server
-    if (json.caps.canTalk) {
-      setTalkEnabled(false, "Talk supported by camera, but not wired yet");
-    } else {
+    if (!json.caps.canTalk) {
       setTalkEnabled(false, "Camera appears listen-only");
     }
   } catch (e) {
@@ -435,26 +605,25 @@ cameraSelect.onchange = async () => {
 
 btnStartLive.onclick = async () => {
   try {
+    clearHistoryUI();
     resetRemoteObjects();
     await unlockPlayback();
-    await fetch("/api/ring/live/stop", { method: "POST" });
+    await stopRingLive();
     await startRingLive(cameraSelect.value);
     await autoConsumeIngest();
-    await tryStartPlayback();
-    //enable only if your server talk-back is implemented AND camera supports talk
-    //setTalkEnabled(true);
-    setTalkEnabled(true, "Mic sends to server (Ring talk-back not wired yet)");
+    //await tryStartPlayback();
+    tryStartPlayback();
+    setTalkEnabled(true, "Hold to talk (if camera supports two-way audio)");
   } catch (e) {
     setRingStatus(`ERROR: ${e.message || e}`);
     setTalkEnabled(false);
   }
 };
 
-document.getElementById("btnStopIngest").onclick = async () => {
+btnStopIngest.onclick = async () => {
   try {
     resetRemoteObjects();
-    const res = await fetch("/api/ingest/stop", { method: "POST" });
-    const json = await res.json();
+    const json = await stopRingLive();
     log("stop ingest:", JSON.stringify(json));
   }
   finally {
@@ -496,3 +665,22 @@ btnTalk.onpointerleave = (e) => { e.preventDefault(); endHold(); };
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) endHold();
 });*/
+
+btnLoadHistory.onclick = async () => {
+   const cameraId = cameraSelect.value;
+  if (!cameraId) return;
+
+  clearHistoryUI();
+  setRingStatus(`Loading history for ${cameraId}...`);
+
+  try {
+    const limit = Number(historyLimitEl.value || 25);
+    const data = await loadHistory(cameraId, limit);
+
+    renderHistory(cameraId, data);
+    setRingStatus(`Loaded history 🎥 ${data?.counts?.recorded || 0} recorded | 🕒 ${data?.counts?.activity || 0} activity`);
+  } catch (e) {
+    setRingStatus(`History ERROR: ${e.message || e}`);
+  }
+};
+
