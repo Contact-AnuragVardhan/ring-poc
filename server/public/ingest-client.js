@@ -1,53 +1,75 @@
 //server\public\ingest-client.js
 import * as mediasoupClient from "mediasoup-client";
 
+/** ---------- DOM ---------- */
 const logEl = document.getElementById("log");
 const remoteVideo = document.getElementById("remoteVideo");
+const historyVideo = document.getElementById("historyVideo");
 
-const btnLoadCameras = document.getElementById("btnLoadCameras");
 const cameraSelect = document.getElementById("cameraSelect");
-const btnStartLive = document.getElementById("btnStartLive");
-const btnStopIngest = document.getElementById("btnStopIngest");
-const ringStatus = document.getElementById("ringStatus");
+const btnLoadCameras = document.getElementById("btnLoadCameras");
+const btnConnect = document.getElementById("btnConnect");
+const btnDisconnect = document.getElementById("btnDisconnect");
+
 const btnTalk = document.getElementById("btnTalk");
+const ringStatus = document.getElementById("ringStatus");
+const secondaryStatus = document.getElementById("secondaryStatus");
+
+const pillWs = document.getElementById("pillWs");
+const pillLive = document.getElementById("pillLive");
+const pillTalk = document.getElementById("pillTalk");
+
+const pageTitle = document.getElementById("pageTitle");
+const pageSub = document.getElementById("pageSub");
+const liveMeta = document.getElementById("liveMeta");
+
+const tabLive = document.getElementById("tabLive");
+const tabHistory = document.getElementById("tabHistory");
+const tabLogs = document.getElementById("tabLogs");
+
+const viewLive = document.getElementById("viewLive");
+const viewHistory = document.getElementById("viewHistory");
+const viewLogs = document.getElementById("viewLogs");
 
 const btnLoadHistory = document.getElementById("btnLoadHistory");
 const historyLimitEl = document.getElementById("historyLimit");
 const historyListEl = document.getElementById("historyList");
-const historyVideo = document.getElementById("historyVideo");
+const historySearchEl = document.getElementById("historySearch");
+const historyRecordedOnlyEl = document.getElementById("historyRecordedOnly");
+const historyMeta = document.getElementById("historyMeta");
+const historyCounts = document.getElementById("historyCounts");
+const listTitle = document.getElementById("listTitle");
+const listSubtitle = document.getElementById("listSubtitle");
+const playbackMeta = document.getElementById("playbackMeta");
 
-function setRingStatus(msg) {
-  ringStatus.textContent = msg;
-  console.log("[ring-ui]", msg);
+const btnClearLogs = document.getElementById("btnClearLogs");
+const btnCopyLogs = document.getElementById("btnCopyLogs");
+const btnUnmute = document.getElementById("btnUnmute");
+const btnMute = document.getElementById("btnMute");
+
+/** ---------- Helpers ---------- */
+function setPill(pill, state /* ok|warn|bad|idle */) {
+  pill.classList.remove("ok", "warn", "bad");
+  if (state === "ok") pill.classList.add("ok");
+  else if (state === "warn") pill.classList.add("warn");
+  else if (state === "bad") pill.classList.add("bad");
 }
-
-function setStartLiveEnabled(enabled) {
-  btnStartLive.disabled = !enabled;
+function setRingStatus(msg, secondary = "") {
+  ringStatus.textContent = msg || "";
+  secondaryStatus.textContent = secondary || "";
+  console.log("[ring-ui]", msg, secondary);
 }
-
 function log(...args) {
   logEl.textContent += args.join(" ") + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
 }
-
-const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
-const ws = new WebSocket(wsUrl);
-
-let device;
-let recvTransport;
-
-//for audio ring --> browser
-let producerIds = new Set();   // holds ring video + ring audio producerIds
-let remoteStream = null;
-let consumed = new Set();      // avoid consuming same producer twice
-
-//for audio browser --> ring
-let sendTransport;
-let micStream;
-let micProducer;
-
-let deviceReadyResolve;
-const deviceReady = new Promise((resolve) => (deviceReadyResolve = resolve));
-
+function fmtTime(ts) {
+  try {
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) return d.toLocaleString();
+  } catch { }
+  return String(ts || "");
+}
 function waitFor(cond, timeoutMs = 8000) {
   const start = Date.now();
   return new Promise((resolve, reject) => {
@@ -57,18 +79,76 @@ function waitFor(cond, timeoutMs = 8000) {
     }, 50);
   });
 }
+function setTab(active) {
+  for (const [t, v, title, sub] of [
+    [tabLive, viewLive, "Live View", "Streaming from Ring via FFmpeg → mediasoup → browser."],
+    [tabHistory, viewHistory, "History", "Play recorded motion/ding clips (recorded=true, status=ready)."],
+    [tabLogs, viewLogs, "Logs", "Client-side session logs for debugging."]
+  ]) {
+    const on = (active === t);
+    t.classList.toggle("active", on);
+    v.classList.toggle("hidden", !on);
+    if (on) {
+      pageTitle.textContent = title;
+      pageSub.textContent = sub;
+    }
+  }
+}
+
+/** ---------- WebSocket ---------- */
+const wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+const ws = new WebSocket(wsUrl);
+
+ws.onopen = () => { setPill(pillWs, "ok"); log("[ws] connected"); };
+ws.onclose = () => { setPill(pillWs, "bad"); log("[ws] closed"); };
+ws.onerror = () => { setPill(pillWs, "warn"); log("[ws] error"); };
+
+/** ---------- mediasoup state ---------- */
+let device;
+let recvTransport;
+
+let producerIds = new Set();
+let remoteStream = null;
+let consumed = new Set();
+
+let sendTransport;
+let micStream;
+let micProducer;
+
+let deviceReadyResolve;
+const deviceReady = new Promise((resolve) => (deviceReadyResolve = resolve));
+
+let playbackUnlocked = false;
+function tryStartPlayback() { remoteVideo.play().catch(() => { }); }
+async function unlockPlayback() {
+  if (playbackUnlocked) return;
+  playbackUnlocked = true;
+  remoteVideo.muted = true;
+  tryStartPlayback();
+}
+
+/** ---------- App state ---------- */
+let selectedCameraId = "";
+let isLive = false;
+let isHolding = false;
+let historyCache = null; // { recorded, activity, counts }
+
+/** ---------- API ---------- */
+async function apiJson(url, init) {
+  const res = await fetch(url, init);
+  const text = await res.text();
+  try { return JSON.parse(text); } catch { return { ok: false, error: text || `HTTP ${res.status}` }; }
+}
 
 async function loadRingCameras() {
-  setRingStatus("Loading cameras...");
-  const res = await fetch("/api/ring/cameras");
-  const json = await res.json();
+  setRingStatus("Loading cameras…");
+  const json = await apiJson("/api/ring/cameras");
   if (!json.ok) throw new Error(json.error || "Failed to load cameras");
 
-  // populate dropdown
   cameraSelect.innerHTML = "";
   const placeholder = document.createElement("option");
   placeholder.value = "";
-  placeholder.textContent = "(select camera)";
+  placeholder.textContent = "(Select camera)";
   cameraSelect.appendChild(placeholder);
 
   for (const cam of json.cameras || []) {
@@ -78,39 +158,34 @@ async function loadRingCameras() {
     cameraSelect.appendChild(opt);
   }
 
-  setRingStatus(`Loaded ${json.cameras?.length || 0} cameras`);
-  setStartLiveEnabled(!!cameraSelect.value);
-}
-
-async function startRingLive(cameraId) {
-  if (!cameraId) throw new Error("Select a camera first");
-  setRingStatus(`Starting live for camera ${cameraId}...`);
-
-  const res = await fetch(`/api/ring/cameras/${encodeURIComponent(cameraId)}/live/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error || "Failed to start live");
-
-  setRingStatus(`Live started: ${json.name || cameraId}`);
+  setRingStatus(`Loaded ${json.cameras?.length || 0} cameras`, "Select one to enable Connect.");
+  btnConnect.disabled = !cameraSelect.value;
+  btnLoadHistory.disabled = !cameraSelect.value;
 }
 
 async function stopRingLive() {
-  const res = await fetch("/api/ingest/stop", { method: "POST" });
-  const json = await res.json();
+  const json = await apiJson("/api/ingest/stop", { method: "POST" });
   return json;
 }
 
+async function startRingLive(cameraId) {
+  const json = await apiJson(`/api/ring/cameras/${encodeURIComponent(cameraId)}/live/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!json.ok) throw new Error(json.error || "Failed to start live");
+  return json;
+}
+
+/** ---------- mediasoup plumbing ---------- */
 async function ensureDevice() {
   if (device) return;
-
   ws.send(JSON.stringify({ type: "getRouterRtpCapabilities" }));
   await waitFor(() => window.__routerCaps);
 
   device = new mediasoupClient.Device();
   await device.load({ routerRtpCapabilities: window.__routerCaps });
-  log("device loaded");
+  log("[ms] device loaded");
   deviceReadyResolve();
 }
 
@@ -120,35 +195,34 @@ async function ensureRecvTransport() {
 
   ws.send(JSON.stringify({ type: "createTransport", data: { direction: "recv" } }));
   await waitFor(() => recvTransport);
-  // consume any producers we already learned about before recvTransport was ready
+
+  // consume any known producers
   for (const id of producerIds) {
     if (!consumed.has(id)) {
       consumeProducer(id);
       consumed.add(id);
     }
   }
+  log("[ms] recv transport ready");
+}
 
-  log("recvTransport ready");
+function consumeProducer(producerId) {
+  ws.send(JSON.stringify({
+    type: "consume",
+    data: { transportId: recvTransport.id, producerId, rtpCapabilities: device.rtpCapabilities }
+  }));
 }
 
 let consuming = false;
-
 async function autoConsumeIngest() {
   if (consuming) return;
   consuming = true;
   try {
     await ensureRecvTransport();
-
-    // ask server for current producers (video+audio)
     ws.send(JSON.stringify({ type: "getProducers" }));
 
-    // wait until we see at least one ring producer
-    try {
-      await waitFor(() => producerIds.size > 0, 5000);
-    } catch {
-      log("No ingest producer yet after Start Live.");
-      return;
-    }
+    try { await waitFor(() => producerIds.size > 0, 5000); }
+    catch { log("[ms] no producers after connect"); return; }
 
     for (const id of producerIds) {
       if (!consumed.has(id)) {
@@ -156,22 +230,9 @@ async function autoConsumeIngest() {
         consumed.add(id);
       }
     }
-  }
-  finally {
+  } finally {
     consuming = false;
   }
-
-}
-
-function consumeProducer(producerId) {
-  ws.send(JSON.stringify({
-    type: "consume",
-    data: {
-      transportId: recvTransport.id,
-      producerId,
-      rtpCapabilities: device.rtpCapabilities
-    }
-  }));
 }
 
 async function ensureSendTransport() {
@@ -180,36 +241,28 @@ async function ensureSendTransport() {
 
   ws.send(JSON.stringify({ type: "createTransport", data: { direction: "send" } }));
   await waitFor(() => sendTransport);
-
-  log("sendTransport ready");
+  log("[ms] send transport ready");
 }
 
+/** ---------- Talkback ---------- */
 async function startMic() {
   await ensureSendTransport();
   if (micProducer) return;
 
   micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    }
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
   });
 
   const track = micStream.getAudioTracks()[0];
   micProducer = await sendTransport.produce({
     track,
-    appData: { label: "mic", cameraId: cameraSelect.value }
+    appData: { label: "mic", cameraId: selectedCameraId }
   });
 
-  ws.send(JSON.stringify({
-    type: "startTalk",
-    data: { cameraId: cameraSelect.value, producerId: micProducer.id }
-  }));
-
-  setRingStatus("Talking… (mic sending)");
+  ws.send(JSON.stringify({ type: "startTalk", data: { cameraId: selectedCameraId, producerId: micProducer.id } }));
+  setPill(pillTalk, "ok");
+  setRingStatus("Talking…", "Release to stop.");
 }
-
 async function stopMic() {
   try { micProducer?.close(); } catch { }
   micProducer = null;
@@ -218,223 +271,153 @@ async function stopMic() {
     for (const t of micStream.getTracks()) t.stop();
     micStream = null;
   }
-
   ws.send(JSON.stringify({ type: "stopTalk" }));
-
-  setRingStatus("Talk stopped");
+  setPill(pillTalk, "warn");
+  setRingStatus("Talk stopped", "");
 }
 
-
-function setTalkEnabled(enabled, reason = "") {
-  btnTalk.disabled = !enabled;
-  btnTalk.title = enabled ? "Hold to speak" : (reason || "Talk not available");
-}
-
-//setTalkEnabled(false, "Talk not wired yet (listen-only mode)");
-
+/** ---------- Reset / session ---------- */
 function resetRemoteObjects() {
   producerIds = new Set();
   consumed = new Set();
   remoteStream = null;
   remoteVideo.srcObject = null;
-  playbackUnlocked = false; // important: allow new autoplay unlock per session
+  playbackUnlocked = false;
 }
 
-let playbackUnlocked = false;
+function setLiveUi(live) {
+  isLive = live;
+  setPill(pillLive, live ? "ok" : "warn");
+  liveMeta.textContent = live ? `camera=${selectedCameraId || "—"} • streaming` : "idle";
 
-async function unlockPlayback() {
-  if (playbackUnlocked) return;
-  playbackUnlocked = true;
+  btnConnect.disabled = !selectedCameraId || live;
+  btnDisconnect.disabled = !live;
 
-  // optional: helps autoplay on some browsers
-  remoteVideo.muted = true;
-
-  tryStartPlayback();
-
-  // if audio is actually flowing, you can unmute video
-  //remoteVideo.muted = false;
+  btnTalk.disabled = !live; // if you want to be stricter, check caps; keeping simple
 }
 
-
-/*async function tryStartPlayback() {
-  try { await remoteVideo.play(); } catch { }
-}*/
-
-function tryStartPlayback() {
-  remoteVideo.play().catch(() => {});
+/** ---------- History ---------- */
+function updateHistoryCounts(data) {
+  const counts = data?.counts || { recorded: 0, activity: 0, total: 0 };
+  historyCounts.classList.add("ok");
+  historyCounts.querySelector(".led").style.background = "var(--good)";
+  historyCounts.lastChild.textContent = `${counts.recorded} recorded • ${counts.activity} activity`;
+  historyMeta.textContent = `Loaded ${counts.total} events`;
 }
 
-let isHolding = false;
-
-function setTalkUI(isTalking) {
-  btnTalk.textContent = isTalking ? "🎙️ Talking…" : "Hold to Talk";
-  btnTalk.style.opacity = isTalking ? "0.8" : "1";
+function matchesSearch(item, q) {
+  if (!q) return true;
+  q = q.toLowerCase();
+  const s = `${item.kind || ""} ${item.created_at || ""} ${item.dingIdStr || ""}`.toLowerCase();
+  return s.includes(q);
 }
 
-function clearHistoryUI() {
+function buildHistoryRows(cameraId, data) {
   historyListEl.innerHTML = "";
-  historyVideo.removeAttribute("src");
-  historyVideo.load();
-}
-
-function fmtTime(ts) {
-  try {
-    const d = new Date(ts);
-    if (!isNaN(d.getTime())) return d.toLocaleString();
-  } catch {}
-  return String(ts || "");
-}
-
-function renderHistory(cameraId, data) {
-  historyListEl.innerHTML = "";
-
   const recorded = data?.recorded || [];
   const activity = data?.activity || [];
-  const counts = data?.counts || { recorded: recorded.length, activity: activity.length, total: recorded.length + activity.length };
+  const q = String(historySearchEl.value || "").trim();
+  const recordedOnly = !!historyRecordedOnlyEl.checked;
 
-  const header = document.createElement("div");
-  header.style.display = "flex";
-  header.style.justifyContent = "space-between";
-  header.style.alignItems = "baseline";
-  header.style.margin = "8px 0";
+  const recFiltered = recorded.filter(x => matchesSearch(x, q));
+  const actFiltered = recordedOnly ? [] : activity.filter(x => matchesSearch(x, q));
 
-  const title = document.createElement("div");
-  title.textContent = `History (${counts.total})`;
-  title.style.fontWeight = "700";
+  listTitle.textContent = recordedOnly ? "Recorded clips" : "Events";
+  listSubtitle.textContent = recordedOnly
+    ? `${recFiltered.length} items`
+    : `${recFiltered.length} recorded • ${actFiltered.length} activity`;
 
-  const sub = document.createElement("div");
-  sub.textContent = `🎥 Recorded: ${counts.recorded}  |  🕒 Activity: ${counts.activity}`;
-  sub.style.opacity = "0.75";
-  sub.style.fontSize = "12px";
+  function addSection(title, items, playable) {
+    // section header
+    const header = document.createElement("div");
+    header.style.padding = "10px 12px";
+    header.style.borderBottom = "1px solid rgba(255,255,255,.06)";
+    header.style.fontFamily = "var(--mono)";
+    header.style.fontSize = "12px";
+    header.style.color = "var(--muted)";
+    header.textContent = title;
+    historyListEl.appendChild(header);
 
-  header.appendChild(title);
-  header.appendChild(sub);
-  historyListEl.appendChild(header);
+    if (!items.length) {
+      const empty = document.createElement("div");
+      empty.style.padding = "12px";
+      empty.style.color = "var(--muted)";
+      empty.style.fontSize = "12px";
+      empty.textContent = "No items.";
+      historyListEl.appendChild(empty);
+      return;
+    }
 
-  // ---- Recorded clips ----
-  const recTitle = document.createElement("div");
-  recTitle.textContent = `🎥 Recorded Clips (${recorded.length})`;
-  recTitle.style.marginTop = "10px";
-  recTitle.style.fontWeight = "700";
-  historyListEl.appendChild(recTitle);
+    for (const h of items) {
+      const row = document.createElement("div");
+      row.className = "item";
 
-  if (!recorded.length) {
-    const empty = document.createElement("div");
-    empty.textContent = "No recorded clips found.";
-    empty.style.opacity = "0.75";
-    empty.style.margin = "6px 0";
-    historyListEl.appendChild(empty);
+      const left = document.createElement("div");
+      left.className = "left";
+
+      const t = document.createElement("div");
+      t.className = "title";
+      t.textContent = `${fmtTime(h.created_at)} — ${h.kind || "event"}`;
+
+      const sub = document.createElement("div");
+      sub.className = "subtitle";
+      sub.textContent = `ding=${h.dingIdStr || h.dingId || h.id} • recorded=${h.recorded} • status=${h.recording_status ?? "null"}`;
+
+      left.appendChild(t);
+      left.appendChild(sub);
+
+      const right = document.createElement("div");
+      right.style.display = "flex";
+      right.style.gap = "8px";
+      right.style.alignItems = "center";
+
+      const badge = document.createElement("span");
+      badge.className = "badge " + (playable ? "good" : "bad");
+      badge.textContent = playable ? "READY" : "NO CLIP";
+
+      const btn = document.createElement("button");
+      btn.textContent = playable ? "Play" : "N/A";
+      btn.disabled = !playable;
+
+      btn.onclick = () => {
+        const ding = h.dingIdStr || h.dingId || h.id;
+        const url = `/api/ring/cameras/${encodeURIComponent(cameraId)}/recordings/${encodeURIComponent(ding)}`;
+        historyVideo.src = url;
+        historyVideo.play().catch(() => { });
+        playbackMeta.textContent = `playing ding=${ding}`;
+        setRingStatus(`Playing recording`, `${h.kind} • ${fmtTime(h.created_at)}`);
+      };
+
+      right.appendChild(badge);
+      right.appendChild(btn);
+
+      row.appendChild(left);
+      row.appendChild(right);
+      historyListEl.appendChild(row);
+    }
   }
 
-  for (const h of recorded) {
-    const row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.gap = "8px";
-    row.style.alignItems = "center";
-    row.style.padding = "6px 0";
-    row.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
-
-    const when = fmtTime(h.created_at);
-    const label = `${when} — ${h.kind || "event"}`;
-
-    const a = document.createElement("a");
-    a.href = "#";
-    a.textContent = label;
-    a.style.textDecoration = "none";
-
-    a.onclick = (e) => {
-      e.preventDefault();
-      const ding = h.dingIdStr || h.dingId || h.id;
-      const url = `/api/ring/cameras/${encodeURIComponent(cameraId)}/recordings/${encodeURIComponent(ding)}`;
-      historyVideo.src = url;
-      historyVideo.play().catch(() => {});
-      setRingStatus(`Playing 🎥 ${h.kind} (${ding})`);
-    };
-
-    // small badge
-    const badge = document.createElement("span");
-    badge.textContent = "READY";
-    badge.style.fontSize = "11px";
-    badge.style.padding = "2px 6px";
-    badge.style.borderRadius = "999px";
-    badge.style.border = "1px solid rgba(255,255,255,0.2)";
-    badge.style.opacity = "0.9";
-
-    row.appendChild(a);
-    row.appendChild(badge);
-    historyListEl.appendChild(row);
-  }
-
-  // ---- Activity ----
-  const actTitle = document.createElement("div");
-  actTitle.textContent = `🕒 Activity (No Recording) (${activity.length})`;
-  actTitle.style.marginTop = "14px";
-  actTitle.style.fontWeight = "700";
-  historyListEl.appendChild(actTitle);
-
-  if (!activity.length) {
-    const empty = document.createElement("div");
-    empty.textContent = "No activity events.";
-    empty.style.opacity = "0.75";
-    empty.style.margin = "6px 0";
-    historyListEl.appendChild(empty);
-  }
-
-  for (const h of activity) {
-    const row = document.createElement("div");
-    row.style.display = "flex";
-    row.style.flexDirection = "column";
-    row.style.padding = "6px 0";
-    row.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
-    row.style.opacity = "0.75";
-
-    const when = fmtTime(h.created_at);
-    const top = document.createElement("div");
-    top.textContent = `${when} — ${h.kind || "event"}`;
-
-    const meta = document.createElement("div");
-    meta.style.fontSize = "12px";
-    meta.style.opacity = "0.9";
-
-    const recFlag = h.recorded === true ? "recorded=true" : "recorded=false";
-    const recStatus = h.recording_status ? `status=${h.recording_status}` : "status=null";
-    meta.textContent = `No clip available (${recFlag}, ${recStatus})`;
-
-    row.title = "This event does not have a playable recording. Only recorded=true and recording_status=ready are playable.";
-    row.appendChild(top);
-    row.appendChild(meta);
-    historyListEl.appendChild(row);
-  }
+  addSection(`🎥 Recorded (${recFiltered.length})`, recFiltered, true);
+  if (!recordedOnly) addSection(`🕒 Activity (${actFiltered.length})`, actFiltered, false);
 }
 
-
 async function loadHistory(cameraId, limit) {
-  const res = await fetch(`/api/ring/cameras/${encodeURIComponent(cameraId)}/history?limit=${encodeURIComponent(limit)}`);
-  const json = await res.json();
+  const json = await apiJson(`/api/ring/cameras/${encodeURIComponent(cameraId)}/history?limit=${encodeURIComponent(limit)}`);
   if (!json.ok) throw new Error(json.error || "history failed");
-  console.log("history events:", json);
   return json;
 }
 
-/*async function playHistoryEvent(cameraId, eventId) {
-  const res = await fetch(`/api/ring/cameras/${encodeURIComponent(cameraId)}/history/${encodeURIComponent(eventId)}/recording`);
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error || "recording failed");
-
-  historyVideo.src = json.url;
-  await historyVideo.play().catch(() => {});
-}*/
-
-const produceCbs = new Map(); // reqId -> cb
+/** ---------- WS handling ---------- */
+const produceCbs = new Map();
 
 ws.onmessage = async (ev) => {
   const msg = JSON.parse(ev.data);
 
-  if (msg.type === "welcome") log("welcome peerId=", msg.peerId);
+  if (msg.type === "welcome") log("[ws] welcome peerId=", msg.peerId);
 
   if (msg.type === "routerRtpCapabilities") {
     window.__routerCaps = msg.data;
-    log("got routerRtpCapabilities");
+    log("[ws] got router caps");
   }
 
   if (msg.type === "transportCreated") {
@@ -451,15 +434,9 @@ ws.onmessage = async (ev) => {
 
       recvTransport.on("connect", ({ dtlsParameters }, cb, errCb) => {
         try {
-          ws.send(JSON.stringify({
-            type: "connectTransport",
-            data: { transportId: recvTransport.id, dtlsParameters }
-          }));
+          ws.send(JSON.stringify({ type: "connectTransport", data: { transportId: recvTransport.id, dtlsParameters } }));
           cb();
-        }
-        catch (err) {
-          errCb(err);
-        }
+        } catch (e) { errCb(e); }
       });
     } else if (t.direction === "send") {
       sendTransport = device.createSendTransport({
@@ -471,10 +448,7 @@ ws.onmessage = async (ev) => {
 
       sendTransport.on("connect", ({ dtlsParameters }, cb, errCb) => {
         try {
-          ws.send(JSON.stringify({
-            type: "connectTransport",
-            data: { transportId: sendTransport.id, dtlsParameters }
-          }));
+          ws.send(JSON.stringify({ type: "connectTransport", data: { transportId: sendTransport.id, dtlsParameters } }));
           cb();
         } catch (e) { errCb(e); }
       });
@@ -483,18 +457,7 @@ ws.onmessage = async (ev) => {
         try {
           const reqId = `${Date.now()}-${Math.random()}`;
           produceCbs.set(reqId, cb);
-
-          ws.send(JSON.stringify({
-            type: "produce",
-            data: {
-              transportId: sendTransport.id,
-              kind,
-              rtpParameters,
-              appData,
-              reqId
-            }
-          }));
-          window.__produceCb = cb;
+          ws.send(JSON.stringify({ type: "produce", data: { transportId: sendTransport.id, kind, rtpParameters, appData, reqId } }));
         } catch (e) { errCb(e); }
       });
     }
@@ -504,9 +467,8 @@ ws.onmessage = async (ev) => {
     const label = msg.data?.label || "";
     if (label.startsWith("ingest:") || label.startsWith("ring:") || label.startsWith("ring-audio:")) {
       producerIds.add(msg.data.producerId);
-      log("new producer:", label, "id=", msg.data.producerId);
+      log("[ms] new producer:", label, "id=", msg.data.producerId);
 
-      // If already started, immediately consume new producers
       if (recvTransport && !consumed.has(msg.data.producerId)) {
         consumeProducer(msg.data.producerId);
         consumed.add(msg.data.producerId);
@@ -515,22 +477,21 @@ ws.onmessage = async (ev) => {
   }
 
   if (msg.type === "producers") {
-    const rings = msg.data.filter(p => {
+    const rings = (msg.data || []).filter(p => {
       const label = (p.label || "");
       return label.startsWith("ingest:") || label.startsWith("ring:") || label.startsWith("ring-audio:");
     });
 
     if (rings.length) {
       for (const p of rings) producerIds.add(p.producerId);
-      log("found producers:", rings.map(r => r.label).join(", "));
+      log("[ms] found producers:", rings.map(r => r.label).join(", "));
     } else {
-      log("no ring producers yet");
+      log("[ms] no ring producers yet");
     }
   }
 
   if (msg.type === "consumed") {
     const { consumerId, kind, rtpParameters } = msg.data;
-
     const consumer = await recvTransport.consume({
       id: consumerId,
       producerId: msg.data.producerId,
@@ -538,20 +499,16 @@ ws.onmessage = async (ev) => {
       rtpParameters
     });
 
-    if (!remoteStream) {
-      remoteStream = new MediaStream();
-    }
+    if (!remoteStream) remoteStream = new MediaStream();
     remoteStream.addTrack(consumer.track);
     remoteVideo.srcObject = remoteStream;
-    // Resume first (start packets), then attempt play
-    ws.send(JSON.stringify({ type: "resume", data: { consumerId } }));
 
-    //await tryStartPlayback();
+    ws.send(JSON.stringify({ type: "resume", data: { consumerId } }));
     tryStartPlayback();
-    // unmute after first track arrives
+    // unmute after first track arrives (user can mute/unmute in UI)
     remoteVideo.muted = false;
 
-    log("consuming", kind, "consumerId=", consumerId);
+    log("[ms] consuming", kind, "consumerId=", consumerId);
   }
 
   if (msg.type === "produced") {
@@ -564,70 +521,105 @@ ws.onmessage = async (ev) => {
 
   if (msg.type === "ingestStopped") {
     resetRemoteObjects();
-    setRingStatus("Stopped");
+    setLiveUi(false);
+    setPill(pillTalk, "warn");
+    setRingStatus("Disconnected", "Live ingest stopped.");
+    log("[server] ingestStopped");
+  }
+
+  if (msg.type === "talkStatus") {
+    // optional: you can show talk state here
+    log("[talk]", JSON.stringify(msg.data || {}));
   }
 
   if (msg.type === "error") {
-    log("ERROR:", msg.error);
+    log("[ws] ERROR:", msg.error);
+    setRingStatus("ERROR", msg.error);
   }
 };
 
-btnLoadCameras.onclick = async () => {
+/** ---------- UI events ---------- */
+tabLive.onclick = () => setTab(tabLive);
+tabHistory.onclick = () => setTab(tabHistory);
+tabLogs.onclick = () => setTab(tabLogs);
+
+btnClearLogs.onclick = () => { logEl.textContent = ""; };
+btnCopyLogs.onclick = async () => {
   try {
-    await loadRingCameras();
-  } catch (e) {
-    setRingStatus(`ERROR: ${e.message || e}`);
+    await navigator.clipboard.writeText(logEl.textContent || "");
+    setRingStatus("Copied logs to clipboard");
+  } catch {
+    setRingStatus("Copy failed (clipboard permission)");
   }
+};
+
+btnMute.onclick = () => { remoteVideo.muted = true; setRingStatus("Muted live audio"); };
+btnUnmute.onclick = () => { remoteVideo.muted = false; setRingStatus("Unmuted live audio"); };
+
+btnLoadCameras.onclick = async () => {
+  try { await loadRingCameras(); }
+  catch (e) { setRingStatus("ERROR loading cameras", e.message || String(e)); }
 };
 
 cameraSelect.onchange = async () => {
-  setStartLiveEnabled(!!cameraSelect.value);
-  setTalkEnabled(false, "Select camera then Start Live");
+  selectedCameraId = cameraSelect.value || "";
+  btnConnect.disabled = !selectedCameraId || isLive;
+  btnLoadHistory.disabled = !selectedCameraId;
 
-  btnLoadHistory.disabled = !cameraSelect.value;
-  clearHistoryUI();
+  // reset talk availability until live is on
+  btnTalk.disabled = true;
+  setPill(pillTalk, "warn");
 
-  const id = cameraSelect.value;
-  if (!id) return;
-
-  try {
-    const res = await fetch(`/api/ring/cameras/${encodeURIComponent(id)}/capabilities`);
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || "caps failed");
-
-    if (!json.caps.canTalk) {
-      setTalkEnabled(false, "Camera appears listen-only");
-    }
-  } catch (e) {
-    setTalkEnabled(false, "Caps check failed");
+  if (!selectedCameraId) {
+    setRingStatus("Select a camera");
+    return;
   }
+
+  setRingStatus(`Selected camera ${selectedCameraId}`, "Ready to connect.");
 };
 
-btnStartLive.onclick = async () => {
+btnConnect.onclick = async () => {
   try {
-    clearHistoryUI();
+    if (!selectedCameraId) throw new Error("Select a camera first");
+
+    setTab(tabLive);
+    setRingStatus("Connecting…", "Starting live ingest + consuming producers…");
+    setPill(pillLive, "warn");
+
     resetRemoteObjects();
     await unlockPlayback();
-    await stopRingLive();
-    await startRingLive(cameraSelect.value);
+
+    // stop previous session
+    await stopRingLive().catch(() => { });
+
+    // start new
+    const started = await startRingLive(selectedCameraId);
+    log("[ring] live started:", JSON.stringify(started));
+
+    // consume
     await autoConsumeIngest();
-    //await tryStartPlayback();
     tryStartPlayback();
-    setTalkEnabled(true, "Hold to talk (if camera supports two-way audio)");
+
+    setLiveUi(true);
+    btnTalk.disabled = false;
+    setRingStatus("Live connected", "Hold to Talk enabled (if device supports two-way).");
   } catch (e) {
-    setRingStatus(`ERROR: ${e.message || e}`);
-    setTalkEnabled(false);
+    setLiveUi(false);
+    setRingStatus("Connect ERROR", e.message || String(e));
+    setPill(pillLive, "bad");
   }
 };
 
-btnStopIngest.onclick = async () => {
+btnDisconnect.onclick = async () => {
   try {
+    setRingStatus("Disconnecting…");
+    await stopRingLive();
+  } finally {
     resetRemoteObjects();
-    const json = await stopRingLive();
-    log("stop ingest:", JSON.stringify(json));
-  }
-  finally {
-    setTalkEnabled(false);
+    setLiveUi(false);
+    btnTalk.disabled = true;
+    setPill(pillTalk, "warn");
+    setRingStatus("Disconnected");
   }
 };
 
@@ -635,18 +627,18 @@ btnTalk.onpointerdown = async (e) => {
   e.preventDefault();
   if (btnTalk.disabled || isHolding) return;
   isHolding = true;
-  setTalkUI(true);
-
-  try {
-    btnTalk.setPointerCapture?.(e.pointerId);
-  } catch { }
+  btnTalk.textContent = "🎙 Talking…";
+  btnTalk.style.opacity = "0.85";
+  try { btnTalk.setPointerCapture?.(e.pointerId); } catch { }
 
   try {
     await startMic();
   } catch (err) {
-    setRingStatus(`Talk ERROR: ${err.message || err}`);
+    setPill(pillTalk, "bad");
+    setRingStatus("Talk ERROR", err.message || String(err));
     isHolding = false;
-    setTalkUI(false);
+    btnTalk.textContent = "🎙 Hold to Talk";
+    btnTalk.style.opacity = "1";
   }
 };
 
@@ -654,33 +646,54 @@ async function endHold() {
   if (!isHolding) return;
   isHolding = false;
   try { await stopMic(); } catch { }
-  setTalkUI(false);
+  btnTalk.textContent = "🎙 Hold to Talk";
+  btnTalk.style.opacity = "1";
 }
-
 btnTalk.onpointerup = (e) => { e.preventDefault(); endHold(); };
 btnTalk.onpointercancel = (e) => { e.preventDefault(); endHold(); };
 btnTalk.onpointerleave = (e) => { e.preventDefault(); endHold(); };
 
-/*window.addEventListener("blur", endHold);
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) endHold();
-});*/
-
 btnLoadHistory.onclick = async () => {
-   const cameraId = cameraSelect.value;
+  const cameraId = selectedCameraId;
   if (!cameraId) return;
 
-  clearHistoryUI();
-  setRingStatus(`Loading history for ${cameraId}...`);
+  setTab(tabHistory);
+  historyMeta.textContent = "Loading…";
+  playbackMeta.textContent = "—";
 
   try {
     const limit = Number(historyLimitEl.value || 25);
     const data = await loadHistory(cameraId, limit);
+    historyCache = data;
 
-    renderHistory(cameraId, data);
-    setRingStatus(`Loaded history 🎥 ${data?.counts?.recorded || 0} recorded | 🕒 ${data?.counts?.activity || 0} activity`);
+    updateHistoryCounts(data);
+    buildHistoryRows(cameraId, data);
+
+    setRingStatus("History loaded", `${data?.counts?.recorded || 0} recorded • ${data?.counts?.activity || 0} activity`);
   } catch (e) {
-    setRingStatus(`History ERROR: ${e.message || e}`);
+    historyMeta.textContent = "Error";
+    setRingStatus("History ERROR", e.message || String(e));
   }
 };
+
+historySearchEl.oninput = () => {
+  if (!historyCache || !selectedCameraId) return;
+  buildHistoryRows(selectedCameraId, historyCache);
+};
+historyRecordedOnlyEl.onchange = () => {
+  if (!historyCache || !selectedCameraId) return;
+  buildHistoryRows(selectedCameraId, historyCache);
+};
+
+/** ---------- Initial state ---------- */
+setTab(tabLive);
+setPill(pillWs, "warn");
+setPill(pillLive, "warn");
+setPill(pillTalk, "warn");
+setRingStatus("Ready", "Load cameras to begin.");
+btnConnect.disabled = true;
+btnDisconnect.disabled = true;
+btnTalk.disabled = true;
+btnLoadHistory.disabled = true;
+
 

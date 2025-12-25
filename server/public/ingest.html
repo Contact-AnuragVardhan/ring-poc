@@ -1,89 +1,514 @@
+<!--server\public\ingest.html-->
 <!doctype html>
 <html>
-
 <head>
   <meta charset="utf-8" />
-  <title>mediasoup ingest POC</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ring + mediasoup Console</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      padding: 16px;
+    :root{
+      --bg:#0b1220;
+      --panel:#0f1a2e;
+      --panel2:#0c1629;
+      --card:#101f37;
+      --text:#e6edf7;
+      --muted:#94a3b8;
+      --border:rgba(255,255,255,.08);
+      --good:#22c55e;
+      --warn:#f59e0b;
+      --bad:#ef4444;
+      --brand:#60a5fa;
+      --shadow: 0 12px 28px rgba(0,0,0,.35);
+      --radius: 14px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family:var(--sans);
+      background: radial-gradient(1200px 800px at 20% 0%, rgba(96,165,250,.12), transparent 60%),
+                  radial-gradient(900px 700px at 80% 10%, rgba(34,197,94,.10), transparent 55%),
+                  var(--bg);
+      color:var(--text);
     }
 
-    video {
-      width: 720px;
-      height: 405px;
-      background: #000;
+    .app{
+      display:grid;
+      grid-template-columns: 340px 1fr;
+      min-height:100vh;
     }
 
-    pre {
-      background: #f5f5f5;
-      padding: 12px;
+    /* Sidebar */
+    .sidebar{
+      border-right:1px solid var(--border);
+      background: linear-gradient(180deg, rgba(15,26,46,.95), rgba(15,26,46,.75));
+      padding:18px;
+    }
+    .brand{
+      display:flex; align-items:center; gap:10px;
+      margin-bottom:14px;
+    }
+    .dot{
+      width:12px; height:12px; border-radius:999px;
+      background: var(--brand);
+      box-shadow: 0 0 0 6px rgba(96,165,250,.15);
+    }
+    .brand h1{
+      font-size:15px; margin:0; letter-spacing:.2px;
+    }
+    .brand p{
+      margin:0; font-size:12px; color:var(--muted);
     }
 
-    button {
-      margin-right: 8px;
+    .panel{
+      background: rgba(16,31,55,.55);
+      border:1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding:12px;
+    }
+
+    .field{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      margin:10px 0;
+    }
+    label{
+      font-size:12px;
+      color:var(--muted);
+    }
+    select, input[type="text"], input[type="number"]{
+      width:100%;
+      border-radius: 12px;
+      border:1px solid var(--border);
+      background: rgba(10,18,34,.7);
+      color:var(--text);
+      padding:10px 12px;
+      outline:none;
+    }
+    select:focus, input:focus{
+      border-color: rgba(96,165,250,.6);
+      box-shadow: 0 0 0 4px rgba(96,165,250,.15);
+    }
+
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .btn{
+      display:inline-flex; align-items:center; justify-content:center; gap:8px;
+      border-radius: 12px;
+      border:1px solid var(--border);
+      background: rgba(8,16,30,.65);
+      color:var(--text);
+      padding:10px 12px;
+      cursor:pointer;
+      user-select:none;
+      transition: transform .04s ease, background .15s ease, opacity .15s ease;
+      font-weight:600;
+      font-size:13px;
+    }
+    .btn:hover{ background: rgba(96,165,250,.12); }
+    .btn:active{ transform: translateY(1px); }
+    .btn[disabled]{ opacity:.45; cursor:not-allowed; }
+    .btn.primary{
+      background: rgba(96,165,250,.18);
+      border-color: rgba(96,165,250,.35);
+    }
+    .btn.danger{
+      background: rgba(239,68,68,.12);
+      border-color: rgba(239,68,68,.35);
+    }
+    .btn.good{
+      background: rgba(34,197,94,.12);
+      border-color: rgba(34,197,94,.35);
+    }
+    .btn.small{ padding:8px 10px; font-size:12px; border-radius: 10px; }
+
+    .statusBar{
+      margin-top:12px;
+      border-top:1px solid var(--border);
+      padding-top:10px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .statusLine{
+      display:flex; gap:10px; align-items:flex-start;
+      font-family: var(--mono);
+      font-size:12px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:6px 10px;
+      border-radius: 999px;
+      border:1px solid var(--border);
+      background: rgba(10,18,34,.6);
+      font-size:12px;
+      color:var(--muted);
+    }
+    .pill .led{
+      width:8px; height:8px; border-radius:999px; background: var(--muted);
+    }
+    .pill.ok .led{ background: var(--good); }
+    .pill.warn .led{ background: var(--warn); }
+    .pill.bad .led{ background: var(--bad); }
+
+    /* Main */
+    .main{
+      padding:18px;
+    }
+    .topbar{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:12px;
+      margin-bottom:14px;
+    }
+    .titleBlock h2{
+      margin:0;
+      font-size:18px;
+      letter-spacing:.2px;
+    }
+    .titleBlock p{
+      margin:4px 0 0;
+      color:var(--muted);
+      font-size:12px;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap:14px;
+    }
+
+    .card{
+      background: rgba(16,31,55,.55);
+      border:1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .cardHeader{
+      display:flex; align-items:center; justify-content:space-between;
+      padding:12px 14px;
+      border-bottom:1px solid var(--border);
+      background: rgba(12,22,41,.65);
+    }
+    .cardHeader .left{
+      display:flex; gap:10px; align-items:center;
+    }
+    .cardHeader h3{
+      margin:0;
+      font-size:14px;
+    }
+    .cardHeader .meta{
+      font-size:12px;
+      color:var(--muted);
+      font-family: var(--mono);
+    }
+
+    video{
+      width:100%;
+      aspect-ratio: 16/9;
+      background:#000;
+      display:block;
+    }
+
+    /* Tabs */
+    .tabs{
+      display:flex; gap:8px; align-items:center;
+    }
+    .tab{
+      border:1px solid var(--border);
+      background: rgba(10,18,34,.6);
+      color:var(--muted);
+      padding:8px 10px;
+      border-radius: 12px;
+      cursor:pointer;
+      font-size:12px;
+      font-weight:700;
+    }
+    .tab.active{
+      color:var(--text);
+      border-color: rgba(96,165,250,.35);
+      background: rgba(96,165,250,.12);
+    }
+
+    .tabBody{ padding:14px; }
+    .hidden{ display:none; }
+
+    /* History */
+    .historyControls{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+      margin-bottom:12px;
+    }
+    .historyControls .left,
+    .historyControls .right{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    .toggle{
+      display:flex; align-items:center; gap:8px;
+      font-size:12px; color:var(--muted);
+      user-select:none;
+    }
+    .toggle input{ transform: translateY(1px); }
+
+    .list{
+      border:1px solid var(--border);
+      border-radius: 12px;
+      overflow:hidden;
+      background: rgba(10,18,34,.45);
+    }
+    .listHeader{
+      padding:10px 12px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      border-bottom:1px solid var(--border);
+      background: rgba(12,22,41,.55);
+      font-size:12px;
+      color:var(--muted);
+      font-family: var(--mono);
+    }
+    .items{
+      max-height: 340px;
+      overflow:auto;
+    }
+    .item{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      padding:10px 12px;
+      border-bottom:1px solid rgba(255,255,255,.06);
+    }
+    .item:last-child{ border-bottom:none; }
+    .item .left{
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      min-width:0;
+    }
+    .item .title{
+      font-size:13px;
+      font-weight:700;
+      white-space:nowrap;
+      overflow:hidden;
+      text-overflow:ellipsis;
+    }
+    .item .subtitle{
+      font-size:12px;
+      color:var(--muted);
+      font-family: var(--mono);
+    }
+    .badge{
+      font-size:11px;
+      border-radius: 999px;
+      padding:4px 8px;
+      border:1px solid var(--border);
+      color:var(--muted);
+      background: rgba(8,16,30,.45);
+      white-space:nowrap;
+    }
+    .badge.good{ border-color: rgba(34,197,94,.35); color: rgba(34,197,94,.95); background: rgba(34,197,94,.10); }
+    .badge.warn{ border-color: rgba(245,158,11,.35); color: rgba(245,158,11,.95); background: rgba(245,158,11,.10); }
+    .badge.bad { border-color: rgba(239,68,68,.35); color: rgba(239,68,68,.95); background: rgba(239,68,68,.10); }
+
+    .item button{
+      border:none;
+      background: rgba(96,165,250,.16);
+      color: var(--text);
+      border:1px solid rgba(96,165,250,.32);
+      padding:8px 10px;
+      border-radius: 10px;
+      cursor:pointer;
+      font-weight:800;
+      font-size:12px;
+    }
+    .item button:disabled{
+      opacity:.35;
+      cursor:not-allowed;
+      background: rgba(148,163,184,.12);
+      border-color: rgba(148,163,184,.25);
+    }
+
+    /* Logs */
+    pre{
+      margin:0;
+      padding:12px;
+      background: rgba(10,18,34,.55);
+      border:1px solid var(--border);
+      border-radius: 12px;
+      color: rgba(226,237,247,.9);
+      font-family: var(--mono);
+      font-size:12px;
+      line-height:1.4;
+      max-height: 360px;
+      overflow:auto;
+    }
+    .hint{
+      color: var(--muted);
+      font-size:12px;
+      margin-top:10px;
     }
   </style>
 </head>
 
 <body>
-  <h1>mediasoup ingest POC (FFmpeg → PlainTransport → Browser)</h1>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="dot"></div>
+        <div>
+          <h1>Ring + mediasoup Console</h1>
+          <p>Live view • Talkback • Recordings</p>
+        </div>
+      </div>
 
-  <section style="border:1px solid #ddd; padding:12px; margin:12px 0;">
-    <h3>Ring Control Plane</h3>
+      <div class="panel">
+        <div class="row" style="justify-content:space-between;">
+          <div class="pill" id="pillWs"><span class="led"></span><span>WS</span></div>
+          <div class="pill" id="pillLive"><span class="led"></span><span>LIVE</span></div>
+          <div class="pill" id="pillTalk"><span class="led"></span><span>TALK</span></div>
+        </div>
 
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button id="btnLoadCameras">Load cameras</button>
+        <div class="field">
+          <label>Camera</label>
+          <select id="cameraSelect">
+            <option value="">(Load cameras)</option>
+          </select>
+        </div>
 
-      <label>
-        Camera:
-        <select id="cameraSelect">
-          <option value="">(load cameras)</option>
-        </select>
-      </label>
+        <div class="row">
+          <button id="btnLoadCameras" class="btn">↻ Load</button>
+          <button id="btnConnect" class="btn primary" disabled>▶ Connect</button>
+          <button id="btnDisconnect" class="btn danger" disabled>■ Disconnect</button>
+        </div>
 
-      <button id="btnStartLive" disabled>Start Live</button>
-      <button id="btnTalk" disabled title="Hold to speak">Hold to Talk</button>
-    </div>
+        <div class="row" style="margin-top:10px;">
+          <button id="btnTalk" class="btn good" disabled title="Hold to speak">🎙 Hold to Talk</button>
+        </div>
 
-    <div id="ringStatus" style="margin-top:8px; font-family: monospace;"></div>
-  </section>
-  <div>
-    <button id="btnStopIngest">Stop ingest</button>
+        <div class="statusBar">
+          <div class="statusLine" id="ringStatus"></div>
+          <div class="statusLine" id="secondaryStatus"></div>
+        </div>
+
+        <div class="hint">
+          Tip: Connect starts the live stream. History clips require <span style="font-family:var(--mono);">recorded=true</span> and <span style="font-family:var(--mono);">recording_status=ready</span>.
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="topbar">
+        <div class="titleBlock">
+          <h2 id="pageTitle">Live View</h2>
+          <p id="pageSub">Select a camera, then Connect.</p>
+        </div>
+        <div class="tabs">
+          <button class="tab active" id="tabLive">Live</button>
+          <button class="tab" id="tabHistory">History</button>
+          <button class="tab" id="tabLogs">Logs</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <!-- Live card -->
+        <section class="card" id="viewLive">
+          <div class="cardHeader">
+            <div class="left">
+              <h3>Remote Stream</h3>
+              <div class="meta" id="liveMeta">idle</div>
+            </div>
+            <div class="row">
+              <button class="btn small" id="btnUnmute">🔊 Unmute</button>
+              <button class="btn small" id="btnMute">🔇 Mute</button>
+            </div>
+          </div>
+          <video id="remoteVideo" autoplay playsinline controls></video>
+        </section>
+
+        <!-- History card -->
+        <section class="card hidden" id="viewHistory">
+          <div class="cardHeader">
+            <div class="left">
+              <h3>History Playback</h3>
+              <div class="meta" id="historyMeta">Load to view clips</div>
+            </div>
+            <div class="row">
+              <button class="btn small" id="btnLoadHistory" disabled>↻ Refresh</button>
+              <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--muted);">
+                Limit
+                <input id="historyLimit" type="number" value="25" min="1" max="200" style="width:90px;" />
+              </label>
+            </div>
+          </div>
+
+          <div class="tabBody">
+            <div class="historyControls">
+              <div class="left">
+                <input id="historySearch" type="text" placeholder="Search (motion, ding, time…)" style="width:260px;" />
+                <label class="toggle">
+                  <input id="historyRecordedOnly" type="checkbox" />
+                  Recorded only
+                </label>
+              </div>
+              <div class="right">
+                <span class="pill" id="historyCounts"><span class="led"></span><span>0</span></span>
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns: 420px 1fr; gap:14px; align-items:start;">
+              <div class="list">
+                <div class="listHeader">
+                  <span id="listTitle">Events</span>
+                  <span id="listSubtitle">—</span>
+                </div>
+                <div class="items" id="historyList"></div>
+              </div>
+
+              <div>
+                <div style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+                  <div style="font-weight:800;">Playback</div>
+                  <div class="meta" id="playbackMeta" style="font-family:var(--mono); color:var(--muted); font-size:12px;">—</div>
+                </div>
+                <video id="historyVideo" controls playsinline></video>
+                <div class="hint">If a clip doesn’t play, it’s usually not recorded or not “ready” (or no subscription).</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Logs card -->
+        <section class="card hidden" id="viewLogs">
+          <div class="cardHeader">
+            <div class="left">
+              <h3>Session Logs</h3>
+              <div class="meta">client side</div>
+            </div>
+            <div class="row">
+              <button class="btn small" id="btnClearLogs">Clear</button>
+              <button class="btn small" id="btnCopyLogs">Copy</button>
+            </div>
+          </div>
+          <div class="tabBody">
+            <pre id="log"></pre>
+          </div>
+        </section>
+      </div>
+
+      <script src="/ingest-client-bundle.js"></script>
+    </main>
   </div>
-
-  <h3>Remote</h3>
-  <video id="remoteVideo" autoplay playsinline controls></video>
-
-  <h3>Logs</h3>
-  <pre id="log"></pre>
-
-  <section style="border:1px solid #ddd; padding:12px; margin:12px 0;">
-    <h3>Ring History</h3>
-
-    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-      <button id="btnLoadHistory" disabled>Load History</button>
-      <label>
-        Limit:
-        <input id="historyLimit" type="number" value="25" min="1" max="200" style="width:80px;" />
-      </label>
-    </div>
-
-    <div style="margin-top:8px; display:flex; gap:16px; flex-wrap:wrap;">
-      <div style="min-width:320px; max-width:520px;">
-        <div style="font-family: monospace; margin-bottom:6px;">Events:</div>
-        <ul id="historyList" style="margin-top:8px; max-height:220px; overflow:auto; padding-left:18px;"></ul>
-      </div>
-
-      <div>
-        <div style="font-family: monospace; margin-bottom:6px;">Playback:</div>
-        <video id="historyVideo" controls playsinline style="width:720px; height:405px; background:#000;"></video>
-      </div>
-    </div>
-  </section>
-
-  <script src="/ingest-client-bundle.js"></script>
 </body>
-
 </html>
