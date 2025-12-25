@@ -16,15 +16,12 @@ COPY build-client.js ./build-client.js
 RUN npm install
 
 # Workaround: Meson "Clock skew detected" during mediasoup-worker build in Docker/WSL2.
-# Touch everything in mediasoup worker tree after install, so timestamps are not "future".
 RUN if [ -d node_modules/mediasoup/worker ]; then \
       find node_modules/mediasoup/worker -type f -exec touch {} + ; \
     fi
 
-COPY server.js ./server.js
-COPY ring-control.js ./ring-control.js
-COPY server-ingest.js ./server-ingest.js
-COPY public ./public
+# Copy everything from server to ./server
+COPY . .
 
 RUN npm run build:client
 
