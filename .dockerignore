@@ -1,0 +1,17 @@
+# Never copy secrets into image
+.env
+server/.env
+
+# Node / build noise
+node_modules
+npm-debug.log
+.yarn
+.yarn-cache
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Temp / runtime
+temp
+*.log
